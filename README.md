@@ -19,7 +19,7 @@
   ## Usage
 
   1. In Metashape: **Tools > Run Script** → select `src/metashape-cross-chunk-alignment.py`
-  2. Go to **Scripts > Align chunk to model (cross-chunk) V2**
+  2. Go to **Scripts > Align Chunk to Chunk**
   3. Select **From** (non-georeferenced chunk) and **To** (georeferenced reference)
   4. Click **Ok**
 
@@ -36,8 +36,8 @@
 
   1. Exports both point clouds to temporary PLY files
   2. Centers both clouds and estimates scale/resolution
-  3. Runs RANSAC global registration (feature matching) for rough alignment
-  4. Refines with coarse then fine ICP (Iterative Closest Point)
+  3. Runs RANSAC global registration (FPFH feature matching) for rough alignment
+  4. Refines with 4-stage cascaded ICP (16x → 8x → 4x → 1x resolution), using **Point-to-Plane ICP with TukeyLoss robust kernel**. Point-to-Plane uses surface normals for faster convergence than classic point-to-point ICP. The TukeyLoss kernel rejects outlier correspondences beyond a threshold, so regions that differ between the two meshes (e.g. 10 years of change) don't corrupt the alignment.
   5. Converts the ICP result from CRS projected space back to Metashape's internal coordinate system using local Cartesian frames
   6. Applies the transform to `chunk.transform.matrix`, moving cameras and point cloud together
 

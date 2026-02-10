@@ -13,6 +13,7 @@
 # This is a python script for Metashape Pro (2.x). Based on the script align_model_to_model in the scripts repository: https://github.com/agisoft-llc/metashape-scripts
 #
 # V2: Fixed coordinate transformation issues for cross-chunk alignment
+# V3: Improved ICP for non-identical meshes (Point-to-Plane, robust kernels, 4-stage cascade)
 
 #-----------------------------
 # Basis
@@ -46,10 +47,14 @@ except AttributeError:
 # Functions: aligning point clouds
 # --------------------------------
 
+ICP_POINT_TO_PLANE = "Point-to-Plane + robust kernel (most accurate, slower)"
+ICP_POINT_TO_POINT = "Point-to-Point (less accurate, faster)"
+
 def align_two_point_clouds(from_points, to_points, scale_ratio=None,
                                  target_resolution=None,
                                  no_global_alignment=False,
-                                 preview_intermediate_alignment=True):
+                                 preview_intermediate_alignment=True,
+                                 icp_method=ICP_POINT_TO_PLANE):
     """
     Align FROM point cloud to TO point cloud (TO is assumed to be in world coordinates).
     FROM can be arbitrary. Only FROM is transformed; TO stays fixed.
@@ -97,10 +102,11 @@ def align_two_point_clouds(from_points, to_points, scale_ratio=None,
     # Apply scale to FROM cloud
     v_from = v_from * scale_ratio
 
-    stage = 0
-    total_stages = 2 if no_global_alignment else 3
-
     # --- Global registration ---
+    icp_scales = [16.0, 8.0, 4.0, 1.0]
+    total_stages = len(icp_scales) if no_global_alignment else len(icp_scales) + 1
+    stage = 0
+
     if not no_global_alignment:
         stage += 1
         print("{}/{}: Global registration...".format(stage, total_stages))
@@ -111,6 +117,16 @@ def align_two_point_clouds(from_points, to_points, scale_ratio=None,
         print("    estimated in {} s".format(time.time() - start))
         Metashape.app.update()
         transformation = global_result.transformation
+
+        # Check if RANSAC flipped the Z-axis (upside-down alignment)
+        R = transformation[:3, :3]
+        if R[2, 2] < 0:
+            print("    WARNING: RANSAC produced upside-down alignment, flipping 180° around X...")
+            flip = np.eye(4)
+            flip[1, 1] = -1
+            flip[2, 2] = -1
+            transformation = flip @ transformation
+
         if preview_intermediate_alignment:
             draw_registration_result(source_down, target_down, transformation, title="Initial global alignment")
     else:
@@ -119,34 +135,33 @@ def align_two_point_clouds(from_points, to_points, scale_ratio=None,
             print("Initial objects shown!")
             draw_registration_result(v_from, v_to, title="Initial alignment")
 
-    # --- Coarse ICP ---
-    stage += 1
-    print("{}/{}: Coarse ICP registration...".format(stage, total_stages))
-    start = time.time()
-    icp_voxel_size_1 = 8.0 * target_resolution
-    source_down_1 = downscale_point_cloud(to_point_cloud(v_from), icp_voxel_size_1)
-    target_down_1 = downscale_point_cloud(to_point_cloud(v_to), icp_voxel_size_1)
-    icp_result_1 = icp_registration(source_down_1, target_down_1, voxel_size=icp_voxel_size_1,
-                                  transform_init=transformation, max_iterations=100)
-    print("    estimated in {} s".format(time.time() - start))
-    Metashape.app.update()
-    transformation = icp_result_1.transformation
-    if preview_intermediate_alignment:
-        draw_registration_result(source_down_1, target_down_1, transformation, title="Coarse ICP alignment")
+    # --- Multi-scale ICP cascade ---
+    source_full = to_point_cloud(v_from)
+    target_full = to_point_cloud(v_to)
 
-    # --- Fine ICP ---
-    stage += 1
-    print("{}/{}: Fine ICP registration...".format(stage, total_stages))
-    start = time.time()
-    icp_voxel_size_2 = 0.5 * target_resolution
-    icp_result_2 = icp_registration(to_point_cloud(v_from), to_point_cloud(v_to),
-                                  voxel_size=icp_voxel_size_2, transform_init=transformation, max_iterations=100)
-    print("    estimated in {} s".format(time.time() - start))
-    Metashape.app.update()
-    transformation = icp_result_2.transformation
-    if preview_intermediate_alignment:
-        draw_registration_result(to_point_cloud(v_from), to_point_cloud(v_to),
-                                 transformation, title="Fine ICP alignment")
+    for i, scale in enumerate(icp_scales):
+        stage += 1
+        voxel_size = scale * target_resolution
+        label = "ICP {:.0f}x".format(scale) if scale > 1 else "ICP fine"
+        print("{}/{}: {} registration (voxel={:.4f})...".format(stage, total_stages, label, voxel_size))
+        start = time.time()
+
+        if scale > 1:
+            source_down = downscale_point_cloud(source_full, voxel_size)
+            target_down = downscale_point_cloud(target_full, voxel_size)
+        else:
+            source_down = source_full
+            target_down = target_full
+
+        icp_result = icp_registration(source_down, target_down, voxel_size=voxel_size,
+                                      transform_init=transformation, max_iterations=100,
+                                      method=icp_method)
+        print("    estimated in {:.1f} s  fitness={:.4f}  rmse={:.6f}".format(
+            time.time() - start, icp_result.fitness, icp_result.inlier_rmse))
+        Metashape.app.update()
+        transformation = icp_result.transformation
+        if preview_intermediate_alignment:
+            draw_registration_result(source_down, target_down, transformation, title=label)
 
     # V2 FIX: Compose full transformation including centering (v1 returned raw ICP matrix
     # without accounting for the center subtraction, so translation was wrong).
@@ -255,14 +270,29 @@ def global_registration(v1, v2, global_voxel_size):
     return source_down, target_down, global_registration_result
 
 
-def icp_registration(source, target, voxel_size, transform_init, max_iterations):
-    # See http://www.open3d.org/docs/release/tutorial/Basic/icp_registration.html#icp-registration
-    threshold = 8.0 * voxel_size
-    reg_p2p = o3d_registration.registration_icp(
+def icp_registration(source, target, voxel_size, transform_init, max_iterations,
+                     method=ICP_POINT_TO_PLANE):
+    threshold = 3.0 * voxel_size
+
+    if method == ICP_POINT_TO_POINT:
+        estimation = o3d_registration.TransformationEstimationPointToPoint()
+    else:
+        # Estimate and orient normals (required for Point-to-Plane)
+        radius_normal = voxel_size * 2.0
+        source.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30))
+        target.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30))
+        source.orient_normals_consistent_tangent_plane(k=10)
+        target.orient_normals_consistent_tangent_plane(k=10)
+
+        sigma = voxel_size * 0.5
+        loss = o3d_registration.TukeyLoss(k=sigma)
+        estimation = o3d_registration.TransformationEstimationPointToPlane(loss)
+
+    result = o3d_registration.registration_icp(
         source, target, threshold, transform_init,
-        o3d_registration.TransformationEstimationPointToPoint(),
+        estimation,
         o3d_registration.ICPConvergenceCriteria(max_iteration=max_iterations))
-    return reg_p2p
+    return result
 
 
 def draw_registration_result(source, target, transformation=None, title="Visualization"):
@@ -329,7 +359,7 @@ def get_chunk_local_transform(chunk):
 class AlignModelDlg(QtWidgets.QDialog):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Align model/dense cloud (cross-chunk) V2")
+        self.setWindowTitle("Align Chunk to Chunk")
 
         # List all objects across all chunks
         self.objects = []
@@ -356,6 +386,9 @@ class AlignModelDlg(QtWidgets.QDialog):
         self.edtTargetResolution.setPlaceholderText("Auto (from point spacing)")
         self.chkUseInitialAlignment = QtWidgets.QCheckBox("Use initial alignment")
         self.chkUseInitialAlignment.setToolTip("Skip global RANSAC registration. Use if chunks are already coarsely aligned.")
+        self.cmbIcpMethod = QtWidgets.QComboBox()
+        self.cmbIcpMethod.addItem(ICP_POINT_TO_PLANE)
+        self.cmbIcpMethod.addItem(ICP_POINT_TO_POINT)
         self.chkPreview = QtWidgets.QCheckBox("Preview intermediate alignment")
         self.chkPreview.setToolTip("Show Open3D visualization windows at each ICP stage.")
         self.btnOk = QtWidgets.QPushButton("Ok")
@@ -370,10 +403,12 @@ class AlignModelDlg(QtWidgets.QDialog):
         layout.addWidget(self.edtScaleRatio,1,1)
         layout.addWidget(QtWidgets.QLabel("Target resolution:"),1,2)
         layout.addWidget(self.edtTargetResolution,1,3)
-        layout.addWidget(self.chkUseInitialAlignment,2,1)
-        layout.addWidget(self.chkPreview,2,3)
-        layout.addWidget(self.btnOk,3,1)
-        layout.addWidget(self.btnQuit,3,3)
+        layout.addWidget(QtWidgets.QLabel("ICP method:"),2,0)
+        layout.addWidget(self.cmbIcpMethod,2,1,1,3)
+        layout.addWidget(self.chkUseInitialAlignment,3,1)
+        layout.addWidget(self.chkPreview,3,3)
+        layout.addWidget(self.btnOk,4,1)
+        layout.addWidget(self.btnQuit,4,3)
         self.setLayout(layout)
 
         self.btnOk.clicked.connect(self.align)
@@ -442,11 +477,12 @@ class AlignModelDlg(QtWidgets.QDialog):
         target_resolution = None if self.edtTargetResolution.text() == '' else float(self.edtTargetResolution.text())
         no_global_alignment = self.chkUseInitialAlignment.isChecked()
         preview = self.chkPreview.isChecked()
+        icp_method = self.cmbIcpMethod.currentText()
 
         # Calculate transformation (in CRS projected coordinate space)
-        print("\nComputing ICP alignment...")
+        print("\nComputing ICP alignment ({})...".format(icp_method))
         M12, scale_ratio = align_two_point_clouds(v1, v2, scale_ratio, target_resolution,
-                                     no_global_alignment, preview)
+                                     no_global_alignment, preview, icp_method)
 
         # Verify the rotation matrix is valid
         R = np.array([[M12[r,c] for c in range(3)] for r in range(3)])
@@ -493,5 +529,5 @@ def show_alignment_dialog():
     AlignModelDlg()
 
 # Add menu item
-Metashape.app.addMenuItem("Scripts/Align chunk to model (cross-chunk) V2", show_alignment_dialog)
-print("To execute this script press Scripts/Align chunk to model (cross-chunk) V2")
+Metashape.app.addMenuItem("Scripts/Align Chunk to Chunk", show_alignment_dialog)
+print("To execute this script press Scripts/Align Chunk to Chunk")
