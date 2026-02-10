@@ -8,8 +8,7 @@
   ## Requirements
 
   - Metashape Pro 2.3
-  - Two chunks: one with photos (non-georeferenced), one with a georeferenced point cloud
-  - Both chunks must have a CRS set (e.g. EPSG:28992)
+  - Two chunks with point clouds and a CRS set (e.g. EPSG:28992)
 
   Dependencies (installed automatically via `pip_auto_install`):
   - open3d 0.19.0
