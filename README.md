@@ -3,7 +3,7 @@
   Aligns a non-georeferenced Metashape chunk (with cameras/photos) to a georeferenced point cloud in another chunk using point cloud ICP
    registration. The entire chunk moves — cameras and point cloud together — so photos end up georeferenced.
 
-  Developed by Ariicia Kuiters, based on [agisoft-llc/metashape-scripts](https://github.com/agisoft-llc/metashape-scripts) `align_model_to_model.py`, adapted for cross-chunk alignment. The original script is in `reference/align_chunk_to_model.py`.
+  Developed by Ariicia Kuiters, based on [agisoft-llc/metashape-scripts](https://github.com/agisoft-llc/metashape-scripts) `align_model_to_model.py`, adapted for cross-chunk alignment. Ariicia's original (pre-fix) script is in `reference/align_chunk_to_model.py`.
 
   ## Requirements
 
