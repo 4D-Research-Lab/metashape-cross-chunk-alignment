@@ -40,3 +40,13 @@
   4. Refines with coarse then fine ICP (Iterative Closest Point)
   5. Converts the ICP result from CRS projected space back to Metashape's internal coordinate system using local Cartesian frames
   6. Applies the transform to `chunk.transform.matrix`, moving cameras and point cloud together
+
+## Fixes over original script
+
+- **Centering**: Both point clouds are centered before ICP. Original only centered one conditionally, breaking RANSAC/ICP with large coordinate differences.
+- **Full matrix composition**: Return matrix is now `T_to @ ICP @ Scale @ T_from`, properly accounting for centering and scaling. Original returned raw ICP matrix.
+- **Source resolution scaling**: Added missing `* scale_ratio` when estimating source resolution, fixing voxel size calculation.
+- **Coordinate space conversion**: Added `get_chunk_local_transform()` to convert ICP result (CRS projected space) back to chunk transform space via `localframe()`/`project()`/`unproject()`.
+- **Transform formula**: Changed from `to_chunk.transform * M12 * S` (mixed CRS/ECEF spaces) to `from_chunk.transform * T⁻¹ * shift⁻¹ * M12 * T`.
+- **Removed `updateTransform()`**: Was overwriting the alignment by recomputing from reference data.
+- **Export fixes**: Added `clip_to_region=False` (default True was clipping points), pass point cloud keys instead of objects.
