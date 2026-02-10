@@ -29,15 +29,21 @@
   |---|---|
   | Scale ratio | Size ratio between target and source. Leave empty to auto-estimate from convex hulls |
   | Target resolution | Point spacing in target coords. Leave empty to auto-estimate |
+  | ICP method | See [ICP methods](#icp-methods) below |
   | Use initial alignment | Skip global RANSAC, start ICP from current position. Use for refinement after a first pass |
   | Preview intermediate alignment | Show Open3D windows at each stage (may crash on integrated GPUs due to OpenGL conflicts) |
+
+  ### ICP methods
+
+  - **Point-to-Plane + robust kernel** (default): Minimizes the distance from each source point to the tangent plane at the nearest target point, using estimated surface normals. Converges faster and more accurately than Point-to-Point. Uses a TukeyLoss robust kernel that completely rejects correspondences with large residuals, so regions that differ between the two meshes (e.g. structural changes over time) don't corrupt the alignment. Best for similar but non-identical point clouds.
+  - **Point-to-Point**: Minimizes the raw distance between corresponding points. Faster per iteration but less accurate, and treats all correspondences equally with no outlier rejection. Only suitable for identical or near-identical meshes where every point has a close match.
 
   ## How it works
 
   1. Exports both point clouds to temporary PLY files
   2. Centers both clouds and estimates scale/resolution
   3. Runs RANSAC global registration (FPFH feature matching) for rough alignment
-  4. Refines with 4-stage cascaded ICP (16x → 8x → 4x → 1x resolution), using **Point-to-Plane ICP with TukeyLoss robust kernel**. Point-to-Plane uses surface normals for faster convergence than classic point-to-point ICP. The TukeyLoss kernel rejects outlier correspondences beyond a threshold, so regions that differ between the two meshes (e.g. 10 years of change) don't corrupt the alignment.
+  4. Refines with 4-stage cascaded ICP (16x → 8x → 4x → 1x resolution) using the selected [ICP method](#icp-methods)
   5. Converts the ICP result from CRS projected space back to Metashape's internal coordinate system using local Cartesian frames
   6. Applies the transform to `chunk.transform.matrix`, moving cameras and point cloud together
 
